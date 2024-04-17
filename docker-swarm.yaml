@@ -1,0 +1,101 @@
+---
+- name: Install docker on all servers
+  hosts: docker_servers
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Update all the servers
+      shell: apt update -y
+    - name: Install docker on all servers
+      shell: curl -sL https://get.docker.com | bash
+    - name: Check Docker installation
+      shell: docker ps
+      register: install_status
+    - name: Install status
+      debug:
+        msg: "{{ install_status }}"
+  tags: docker_install
+
+- name: enable docker swarm in leader node
+  hosts: leader_server
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Check Swarm status
+      shell: docker info | grep -i swarm | cut -d ':' -f2
+      register: swarm_status
+    - name: geting output
+      debug:
+        msg: "{{ swarm_status.stdout_lines }}"
+    - name: docker swarm is inactive
+      when: "' inactive' in swarm_status.stdout_lines"
+      shell: docker swarm init
+    - name: docker swarm is active
+      debug:
+        msg: "Docker Swarm is now active."
+      when: "' active' in swarm_status.stdout_lines"
+    - name: get manager token from swarm
+      shell: docker swarm join-token -q manager
+      register: manager_token
+    - name:
+      debug:
+        msg: "{{ manager_token.stdout_lines }}"
+    - name: get worker token from swarm
+      shell: docker swarm join-token -q worker
+      register: worker_token
+    - name:
+      debug:
+        msg: "{{ worker_token.stdout_lines }}"
+    - name: get leader server ip address
+      shell: curl -sL http://169.254.169.254/latest/meta-data/local-ipv4/
+      register: leader_ip
+    - name:
+      debug:
+        msg: "{{ leader_ip.stdout_lines }}"
+    - set_fact:
+        token_worker: "{{ worker_token.stdout }}"
+    - set_fact:
+        token_manager: "{{ manager_token.stdout }}"
+    - set_fact:
+        ip_master: "{{ leader_ip.stdout }}"
+    - name: export private_ip
+      add_host:
+        name: leader_pvt_ip
+        shared_variable: "{{ ip_master }}"
+    - name: export manager token
+      add_host:
+        name: mgr_token
+        shared_variable: "{{ token_manager }}"
+    - name: export worker token
+      add_host:
+        name: wrk_token
+        shared_variable: "{{ token_worker }}"
+- name: add managers to the cluster
+  hosts: manager_servers
+  become: true
+  gather_facts: true
+  vars: 
+    token: "{{ hostvars['mgr_token']['shared_variable'] }}"
+    master_ip: "{{ hostvars['leader_pvt_ip']['shared_variable'] }}"
+  tasks:
+    - name: add mangers to the Swarm
+      shell: docker swarm join --token {{ token }} {{ master_ip }}:2377
+
+- name: add workers to the cluster
+  hosts: worker_servers
+  become: true
+  gather_facts: true
+  vars: 
+    w_token: "{{ hostvars['wrk_token']['shared_variable'] }}"
+    master_ip: "{{ hostvars['leader_pvt_ip']['shared_variable'] }}"
+  tasks:
+    - name: add mangers to the Swarm
+      shell: docker swarm join --token {{ w_token }} {{ master_ip }}:2377
+
+- name: deploy an application in swarm
+  hosts: leader_server
+  become: true
+  tasks:
+    - name: add service to the docker swarm
+      shell: docker service create --constraint=node.role==worker --name webapp -p 80:80 --replicas 3 chaitanyamanikumar/colorgame:v1
+      
